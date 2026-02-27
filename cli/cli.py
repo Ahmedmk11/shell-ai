@@ -32,6 +32,10 @@ def print_header():
     console.print("\nType 'exit' to quit")
     console.print("[dim]AI prompt by default · Use [bold #2563EB]run[/] <cmd> for shell execution[/]\n")
 
+def authenticate_github():
+    # Placeholder for GitHub authentication logic
+    pass
+
 def main():
     parser = argparse.ArgumentParser(prog="shellai")
 
@@ -39,6 +43,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.15, help="Temperature for the model")
     parser.add_argument("--repo", type=str, default=".", help="Repository to use")
     parser.add_argument("--no_exec", action="store_true", help="Flag to disable execution")
+    parser.add_argument("--github", action="store_false", help="Flag to enable GitHub authentication")
 
     args = parser.parse_args()
 
