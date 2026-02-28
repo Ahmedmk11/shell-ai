@@ -29,7 +29,7 @@ def print_header():
     ascii_title = f.renderText('ShellAI').rstrip()
     console.print(Panel(f"[#2563EB]{ascii_title}", border_style="#1D4ED8"))
 
-    console.print("\nType 'exit' to quit")
+    console.print("\nType [bold #2563EB]'exit'[/] to quit")
     console.print("[dim]AI prompt by default · Use [bold #2563EB]run[/] <cmd> for shell execution[/]\n")
 
 def authenticate_github():
@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.15, help="Temperature for the model")
     parser.add_argument("--repo", type=str, default=".", help="Repository to use")
     parser.add_argument("--no_exec", action="store_true", help="Flag to disable execution")
+    parser.add_argument("--no-path", action="store_true", help="Flag to hide file paths in CLI")
     parser.add_argument("--github", action="store_false", help="Flag to enable GitHub authentication")
 
     args = parser.parse_args()
@@ -61,7 +62,7 @@ def main():
         shell_flag = "-Command"
     elif shell_name in ["bash", "zsh", "sh", "fish"]:
         shell_flag = "-c"
-    elif shell_name == "cmd":
+    elif  "cmd" in shell_name:
         shell_flag = "/c"
     else:
         shell_flag = "-c"
@@ -69,9 +70,10 @@ def main():
     while True:
         try:
             cwd = Path.cwd()
+            displayed_path = cwd.as_posix() if not args.no_path else cwd.as_posix().split("/")[-1]
 
             user_input = session.prompt(
-                HTML(f"<prompt>(ShellAI)</prompt> {shell_name} {cwd.as_posix()}> "),
+                HTML(f"<prompt>(ShellAI)</prompt> {shell_name} {displayed_path}> "),
                 style=style
             )
 
@@ -102,7 +104,7 @@ def main():
                         target = parts[1] if len(parts) > 1 else str(Path.home())
 
                         try:
-                            new_path = (Path.cwd() / target).expanduser().resolve()
+                            new_path = Path(target).expanduser().resolve()
                             if not new_path.exists() or not new_path.is_dir():
                                 print("Directory does not exist.")
                             else:
@@ -113,8 +115,7 @@ def main():
 
                         continue
 
-                    process = subprocess.Popen([shell_path, shell_flag, cmd])
-                    process.wait()
+                    process = subprocess.run([shell_path, shell_flag, cmd])
                     continue
                 except KeyboardInterrupt:
                     process.terminate()

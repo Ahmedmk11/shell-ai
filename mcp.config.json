@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "git": {
+      "type": "stdio",
+      "url": ""
+    },
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "",
+        "X-MCP-Toolsets": "repos,issues,pull_requests,git",
+        "X-MCP-Readonly": "false"
+      }
+    }
+  }
+}
