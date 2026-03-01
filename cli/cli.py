@@ -1,15 +1,17 @@
 import argparse
 from pathlib import Path
-
+import shellingham
+import subprocess
+import os
+from dotenv import load_dotenv
 from pyfiglet import Figlet
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.live import Live
 from rich.markdown import Markdown
-from langchain_core.messages import AIMessageChunk
+from rich.align import Align
 
-import shellingham
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
@@ -18,11 +20,8 @@ from cli.utils.lexer import RunLexer
 from cli.agent import Agent
 from cli.tools.run_command import run_command
 
-import subprocess
-import os
-
-from dotenv import load_dotenv
 from langgraph.errors import GraphRecursionError
+from langchain_core.messages import AIMessageChunk
 
 load_dotenv()
 
@@ -55,6 +54,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.15, help="Temperature for the model")
     parser.add_argument("--no-exec", action="store_true", help="Flag to disable execution")
     parser.add_argument("--no-path", action="store_true", help="Flag to hide file paths in CLI")
+    parser.add_argument("--no-usage", action="store_true", help="Flag to disable usage tracking")
 
     parser.add_argument("--github", action="store_false", help="Flag to enable GitHub authentication")
     parser.add_argument("--repo", type=str, default=".", help="Repository to use")
@@ -150,7 +150,9 @@ def main():
                 full_response = ""
 
                 try:
-                    with Live(console=Console(), refresh_per_second=15) as live:
+                    console = Console()
+
+                    with Live(console=console, refresh_per_second=15) as live:
                         for msg, metadata in agent.stream(user_input):
                             if (
                                 isinstance(msg, AIMessageChunk)
@@ -158,14 +160,44 @@ def main():
                                 and msg.content
                             ):
                                 full_response += msg.content
-                                live.update(Markdown(full_response))
+
+                                live.update(
+                                    Panel(
+                                        Markdown(full_response),
+                                        border_style="white",
+                                        padding=(1, 2),
+                                        expand=True,
+                                        title="Agent",
+                                        title_align="left"
+                                    )
+                                )
+
+                    if not args.no_usage:
+                        if agent.usage_callback.usage_metadata:
+                            total_input = 0
+                            total_output = 0
+                            models = []
+
+                            for model, usage in agent.usage_callback.usage_metadata.items():
+                                total_input += usage.get("input_tokens", 0)
+                                total_output += usage.get("output_tokens", 0)
+                                models.append(model)
+
+                            usage_text = (
+                                f"{' · '.join(models)} · ↑ {total_output} ↓ {total_input} · "
+                                f"{total_input + total_output} tok"
+                            )
+
+                            console.print(
+                                Align.right(f"[dim]{usage_text}[/dim]")
+                            )
+
                 except GraphRecursionError:
                     print("Error: The agent got stuck in a loop and was stopped.")
                 except Exception as e:
                     print(f"Error: {e}")
 
                 print()
-
         except KeyboardInterrupt:
             print("\033[2J\033[H", end="")
             print("Exiting ShellAI. Goodbye!")
