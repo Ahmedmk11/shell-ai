@@ -6,10 +6,12 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "langchain>=1.2.10",
+    "langchain-groq>=1.1.2",
     "langgraph>=1.0.9",
     "prompt-toolkit>=3.0.52",
     "psutil>=7.2.2",
     "pyfiglet>=1.0.4",
+    "python-dotenv>=1.2.1",
     "rich>=14.3.3",
     "typer>=0.24.1",
 ]

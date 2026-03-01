@@ -12,6 +12,11 @@ from prompt_toolkit.formatted_text import HTML
 from cli.utils.lexer import RunLexer
 
 import subprocess
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def get_shell():
     try:
@@ -108,7 +113,6 @@ def main():
                             if not new_path.exists() or not new_path.is_dir():
                                 print("Directory does not exist.")
                             else:
-                                import os
                                 os.chdir(new_path)
                         except Exception as e:
                             print(f"Invalid path: {e}")
