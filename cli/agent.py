@@ -1,14 +1,18 @@
 import json
 import platform
 
+from langgraph.checkpoint.memory import MemorySaver
+from uuid import uuid4
+
 from langchain.chat_models import init_chat_model
 import os
 
 from langgraph.graph import START, StateGraph, END
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from state import AgentState
-from utils.tool_result import ToolResult
+from cli.state import AgentState
+from cli.utils import tool_result
+from cli.utils.tool_result import ToolResult
 
 class LLMClient:
     def __init__(self, temperature: float = 0.15, tools: list | None = None) -> None:
@@ -35,14 +39,30 @@ class Agent:
 
         self.shell_path = shell_path
         self.shell_flag = shell_flag
+
+        self.thread_id = str(uuid4())
+        # self.memory = MemorySaver()
+
         self.llm = LLMClient(temperature, self.tools)
         self.graph = self._build_graph()
-        self.system_prompt = f"""You are a helpful CLI assistant that executes shell commands.
+
+        self.system_prompt = f"""You are a CLI reasoning agent that decides which shell commands to execute.
 
         EXECUTION ENVIRONMENT
         Shell: {shell_path}
         Flag: {shell_flag}
+
         Only use syntax compatible with {shell_path}.
+
+        REASONING RULES
+        - Execute a command ONLY if the user directly asks for it OR if it's essential to answer their question
+        - Do NOT execute commands speculatively or to "check" things
+        - Do NOT chain commands, only one command at a time
+        - If the user asks a question (not a command), answer without running anything
+        - NEVER execute commands without being asked
+
+        AVAILABLE TOOL
+        - run_command: Runs a command in the shell and returns the output.
 
         TOOL RESPONSE FORMAT
         Responses are JSON with:
@@ -53,13 +73,18 @@ class Agent:
         - new_working_directory (string or null): Updated working directory if changed, otherwise null
 
         HANDLING BLOCKED COMMANDS
-        - guardrail="block": Tool call was invalid. Do NOT retry. Suggest an alternative.
-        - guardrail="partial": Command is dangerous. Do NOT execute NOR retry. Show the user the exact command to run manually with context.
-        - guardrail="no-exec": Read-only mode. Do NOT execute. Show the user the exact command with context.
+        - guardrail="block": Do NOT retry. Pass the error to the responder.
+        - guardrail="partial": Do NOT execute NOR retry. Pass to responder.
+        - guardrail="no-exec": Do NOT execute. Pass to responder.
+        """
+        self.responder_prompt = f"""You are a CLI assistant that communicates results to the user.
 
-        BEST PRACTICES
-        - Always explain what a command does
-        - Provide context on why commands are necessary
+            You will receive a conversation history including tool results.
+
+            Your job is to summarize what happened in a clear way:
+            1. The exact command that was run (or would have been run if blocked)
+            2. Whether it succeeded or failed
+            3. The result or error message
         """
 
     def invoke(self, user_input: str, max_iterations: int = 8):
@@ -67,7 +92,10 @@ class Agent:
             "messages": [HumanMessage(content=user_input)],
             "working_directory": os.getcwd()
         }
-        config = {"recursion_limit": max_iterations}
+        config = {
+            "recursion_limit": max_iterations,
+            "configurable": {"thread_id": self.thread_id}
+        }
         return self.graph.invoke(state, config)
 
     def stream(self, user_input: str, max_iterations: int = 8):
@@ -75,20 +103,23 @@ class Agent:
             "messages": [HumanMessage(content=user_input)],
             "working_directory": os.getcwd()
         }
-        config = {"recursion_limit": max_iterations}
+        config = {
+            "recursion_limit": max_iterations,
+            "configurable": {"thread_id": self.thread_id}
+        }
         
-        for update in self.graph.stream(state, config, stream_mode="updates"):
-            yield update
+        for msg, metadata in self.graph.stream(state, config, stream_mode="messages"):
+            yield msg, metadata
 
     def _build_graph(self):
         def reasoning_node(state: AgentState) -> AgentState:
             messages = [
-                SystemMessage(content=self.system_prompt),
+                SystemMessage(content=self.system_prompt + f"\nCurrent working directory: {state['working_directory']}"),
                 *state["messages"]
             ]
 
             response = self.llm.llm.invoke(messages)
-
+            
             return {
                 "messages": state["messages"] + [response],
                 "working_directory": state["working_directory"]
@@ -147,7 +178,7 @@ class Agent:
             for tool_call in last_message.tool_calls:
 
                 # does the tool exist?
-                if not any(t.name == tool_call.name for t in self.tools):
+                if not any(t.name == tool_call["name"] for t in self.tools):
                     guardrail_errors.append(
                         ToolMessage(
                             content=ToolResult(
@@ -157,15 +188,15 @@ class Agent:
                                 error="(Guardrail) Tool doesn't exist",
                                 new_working_directory=None
                             ).model_dump_json(),
-                            tool_call_id=tool_call.id
+                            tool_call_id=tool_call["id"]
                         )
                     )
                     continue
 
-                # are the arguments valid?
-                if tool_call.name == "run_command":
-                    command = tool_call.args.get("command")
+                if tool_call["name"] == "run_command":
+                    command = tool_call["args"].get("command", "")
 
+                    # are the arguments valid?
                     if not command:
                         guardrail_errors.append(
                             ToolMessage(
@@ -176,40 +207,53 @@ class Agent:
                                     error="(Guardrail) Missing required argument: command",
                                     new_working_directory=None
                                 ).model_dump_json(),
-                                tool_call_id=tool_call.id
+                                tool_call_id=tool_call["id"]
                             )
                         )
                         continue
                     
-                # is there a --no-exec flag?
-                if tool_call.name == "run_command" and self.no_exec:
-                    guardrail_errors.append(ToolMessage(
-                        content=ToolResult(
-                            guardrail="no-exec",
-                            success=False,
-                            result="",
-                            error="(Guardrail) Execution blocked: --no-exec flag is enabled.",
-                            new_working_directory=None
-                        ).model_dump_json(),
-                        tool_call_id=tool_call.id
-                    ))
-                    continue
+                    # is there a --no-exec flag?
+                    if self.no_exec:
+                        guardrail_errors.append(ToolMessage(
+                            content=ToolResult(
+                                guardrail="no-exec",
+                                success=False,
+                                result="",
+                                error="(Guardrail) Execution blocked: --no-exec flag is enabled.",
+                                new_working_directory=None
+                            ).model_dump_json(),
+                            tool_call_id=tool_call["id"]
+                        ))
+                        continue
 
-                # is it a destructive command?
-                command = tool_call.args.get("command", "").lower()
+                    # does the command contain chained operators?
+                    if any(op in command for op in [";", "&&", "||"]):
+                        guardrail_errors.append(ToolMessage(
+                            content=ToolResult(
+                                guardrail="block",
+                                success=False,
+                                result="",
+                                error="(Guardrail) Chained commands are not allowed. Run one command at a time.",
+                                new_working_directory=None
+                            ).model_dump_json(),
+                            tool_call_id=tool_call["id"]
+                        ))
+                        continue
 
-                if tool_call.name == "run_command" and any(word in command for word in destructive_words):
-                    guardrail_errors.append(ToolMessage(
-                        content=ToolResult(
-                            guardrail="partial",
-                            success=False,
-                            result="",
-                            error="(Guardrail) Execution blocked: The command is potentially destructive.",
-                            new_working_directory=None
-                        ).model_dump_json(),
-                        tool_call_id=tool_call.id
-                    ))
-                    continue
+                    # is it a destructive command?
+                    command = tool_call["args"].get("command", "").lower()
+                    if any(word in command for word in destructive_words):
+                        guardrail_errors.append(ToolMessage(
+                            content=ToolResult(
+                                guardrail="partial",
+                                success=False,
+                                result="",
+                                error="(Guardrail) Execution blocked: The command is potentially destructive.",
+                                new_working_directory=None
+                            ).model_dump_json(),
+                            tool_call_id=tool_call["id"]
+                        ))
+                        continue
 
             if guardrail_errors:
                 return {
@@ -226,6 +270,9 @@ class Agent:
                 return "tool"
 
             if isinstance(last_message, ToolMessage):
+                tool_result = json.loads(last_message.content)
+                if tool_result.get("success") and tool_result.get("guardrail") == "":
+                    return "responder"
                 return "reasoning"
 
             return END
@@ -239,11 +286,11 @@ class Agent:
             tools_by_name = {tool.name: tool for tool in self.tools}
 
             for tool_call in last_message.tool_calls:
-                tool = tools_by_name.get(tool_call.name)
+                tool = tools_by_name.get(tool_call["name"])
 
                 try:
                     result = tool.invoke({
-                        "command": tool_call.args.get("command"),
+                        "command": tool_call["args"].get("command"),
                         "shell_path": self.shell_path,
                         "shell_flag": self.shell_flag,
                         "working_directory": state.get("working_directory"),
@@ -256,7 +303,7 @@ class Agent:
 
                     tool_results.append(ToolMessage(
                         content=result.model_dump_json(),
-                        tool_call_id=tool_call.id
+                        tool_call_id=tool_call["id"]
                     ))
                 except Exception as e:
                     tool_results.append(ToolMessage(
@@ -267,7 +314,7 @@ class Agent:
                             error=str(e),
                             new_working_directory=None
                         ).model_dump_json(),
-                        tool_call_id=tool_call.id
+                        tool_call_id=tool_call["id"]
                     ))
 
             return {
@@ -275,15 +322,31 @@ class Agent:
                 "working_directory": new_working_directory
             }
 
+        def responder_node(state: AgentState) -> AgentState:
+            messages = [
+                SystemMessage(content=self.responder_prompt + f"\nCurrent working directory: {state['working_directory']}"),
+                *state["messages"]
+            ]
+            
+            responder_llm = init_chat_model(model=os.getenv("GROQ_MODEL"), temperature=0.15)
+            response = responder_llm.invoke(messages)
+            
+            return {
+                "messages": state["messages"] + [response],
+                "working_directory": state["working_directory"]
+            }
+
         graph = StateGraph(AgentState)
         
         graph.add_node("reasoning", reasoning_node)
         graph.add_node("tool_guardrail", tool_guardrail_node)
         graph.add_node("tool", tool_node)
+        graph.add_node("responder", responder_node)
 
         graph.add_edge(START, "reasoning")
         graph.add_edge("reasoning", "tool_guardrail")
         graph.add_conditional_edges("tool_guardrail", should_continue)
-        graph.add_edge("tool", "reasoning")
+        graph.add_conditional_edges("tool", should_continue)
+        graph.add_edge("responder", END)
 
         return graph.compile()

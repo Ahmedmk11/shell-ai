@@ -2,19 +2,27 @@ import argparse
 from pathlib import Path
 
 from pyfiglet import Figlet
+
 from rich.console import Console
 from rich.panel import Panel
+from rich.live import Live
+from rich.markdown import Markdown
+from langchain_core.messages import AIMessageChunk
 
 import shellingham
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
+
 from cli.utils.lexer import RunLexer
+from cli.agent import Agent
+from cli.tools.run_command import run_command
 
 import subprocess
 import os
 
 from dotenv import load_dotenv
+from langgraph.errors import GraphRecursionError
 
 load_dotenv()
 
@@ -44,22 +52,14 @@ def authenticate_github():
 def main():
     parser = argparse.ArgumentParser(prog="shellai")
 
-    parser.add_argument("--model", type=str, default="openai/gpt-oss-120b", help="Model to use")
     parser.add_argument("--temperature", type=float, default=0.15, help="Temperature for the model")
-    parser.add_argument("--repo", type=str, default=".", help="Repository to use")
-    parser.add_argument("--no_exec", action="store_true", help="Flag to disable execution")
+    parser.add_argument("--no-exec", action="store_true", help="Flag to disable execution")
     parser.add_argument("--no-path", action="store_true", help="Flag to hide file paths in CLI")
+
     parser.add_argument("--github", action="store_false", help="Flag to enable GitHub authentication")
+    parser.add_argument("--repo", type=str, default=".", help="Repository to use")
 
     args = parser.parse_args()
-
-    print_header()
-
-    session = PromptSession(lexer=RunLexer())
-    style = Style.from_dict({
-        "prompt": "ansicyan bold",
-        "command": "ansiblue bold",
-    })
 
     shell_name, shell_path = get_shell()
 
@@ -71,6 +71,22 @@ def main():
         shell_flag = "/c"
     else:
         shell_flag = "-c"
+
+    agent = Agent(
+        temperature=args.temperature,
+        tools=[run_command],
+        no_exec=args.no_exec,
+        shell_path=shell_path,
+        shell_flag=shell_flag,
+    )
+
+    print_header()
+
+    session = PromptSession(lexer=RunLexer())
+    style = Style.from_dict({
+        "prompt": "ansicyan bold",
+        "command": "ansiblue bold",
+    })
 
     while True:
         try:
@@ -105,7 +121,7 @@ def main():
                 base = parts[0]
 
                 try:
-                    if base == "cd":
+                    if base == "cd" or base == "Set-Location":
                         target = parts[1] if len(parts) > 1 else str(Path.home())
 
                         try:
@@ -129,7 +145,27 @@ def main():
                     print(f"Error running command: {e}")
 
             else:
-                print(f"Running prompt: {user_input}")
+                print()
+
+                full_response = ""
+
+                try:
+                    with Live(console=Console(), refresh_per_second=15) as live:
+                        for msg, metadata in agent.stream(user_input):
+                            if (
+                                isinstance(msg, AIMessageChunk)
+                                and metadata.get("langgraph_node") == "responder"
+                                and msg.content
+                            ):
+                                full_response += msg.content
+                                live.update(Markdown(full_response))
+                except GraphRecursionError:
+                    print("Error: The agent got stuck in a loop and was stopped.")
+                except Exception as e:
+                    print(f"Error: {e}")
+
+                print()
+
         except KeyboardInterrupt:
             print("\033[2J\033[H", end="")
             print("Exiting ShellAI. Goodbye!")

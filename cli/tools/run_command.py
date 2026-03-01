@@ -1,24 +1,12 @@
 import shlex
 from langchain.tools import tool
-from pydantic import BaseModel, Field
 
 import subprocess
 from pathlib import Path
 import os
-from utils.tool_result import ToolResult
 
-class RunCommandInput(BaseModel):
-    """Input for running shell commands."""
-    command: str = Field(description="The command to execute")
-    shell_flag: str = Field(
-        description="The shell flag to use (e.g., -c for bash, -Command for powershell)"
-    )
-    shell_path: str = Field(
-        description="full path to the shell binary (e.g., /bin/bash or /opt/homebrew/bin/zsh)"
-    )
-    working_directory: str = Field(
-        description="The working directory to run the command in"
-    )
+from cli.utils.tool_result import ToolResult
+from cli.utils.run_command_input import RunCommandInput
 
 @tool(args_schema=RunCommandInput)
 def run_command(command: str, shell_flag: str, shell_path: str, working_directory: str) -> ToolResult:
@@ -44,11 +32,11 @@ def run_command(command: str, shell_flag: str, shell_path: str, working_director
     base = tokens[0] if tokens else ""
 
     try:
-        if base == "cd":
+        if base == "cd" or base == "Set-Location":
             target = tokens[1] if len(tokens) > 1 else str(Path.home())
 
             try:
-                new_path = Path(target).expanduser().resolve()
+                new_path = (Path(working_directory) / target).expanduser().resolve()
                 if not new_path.exists() or not new_path.is_dir():
                     return ToolResult(
                         guardrail="",
@@ -62,7 +50,7 @@ def run_command(command: str, shell_flag: str, shell_path: str, working_director
                     return ToolResult(
                         guardrail="",
                         success=True,
-                        result=f"Changed directory to {new_path}",
+                        result=f"Successfully changed directory to {new_path}",
                         error="",
                         new_working_directory=str(new_path)
                     )
@@ -83,7 +71,7 @@ def run_command(command: str, shell_flag: str, shell_path: str, working_director
                     cwd=working_directory,
                     timeout=15
                 )
-
+                
                 return ToolResult(
                     guardrail="",
                     success=result.returncode == 0,
