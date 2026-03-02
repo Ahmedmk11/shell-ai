@@ -2,21 +2,29 @@ import os
 import json
 import platform
 
+import textwrap
 from uuid import uuid4
 
 from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, StateGraph, END
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 
 from cli.state import AgentState
+from cli.utils.debug_logger import append_llm_input
 from cli.utils.tool_result import ToolResult
+
+def get_env_model():
+    model = os.getenv("GROQ_MODEL")
+    if not model:
+        raise ValueError("Model is not set")
+    return model
 
 class LLMClient:
     def __init__(self, temperature: float = 0.15, tools: list | None = None) -> None:
         self.llm = init_chat_model(
-            model=os.getenv("GROQ_MODEL"),
+            model=get_env_model(),
             temperature=temperature,
         ).bind_tools(tools if tools else [])
 
@@ -46,97 +54,48 @@ class Agent:
         self.llm = LLMClient(temperature, self.tools)
         self.graph = self._build_graph()
 
-        self.system_prompt = f"""You are a CLI reasoning agent that decides which shell commands to execute.
+        self.system_prompt = textwrap.dedent(f"""You are a CLI agent. You reason, execute shell commands when needed, and respond to the user.
 
-        EXECUTION ENVIRONMENT
-        Shell: {shell_path}
-        Flag: {shell_flag}
-
+        ENVIRONMENT
+        Shell: {shell_path} (flag: {shell_flag})
         Only use syntax compatible with {shell_path}.
 
         REASONING RULES
-        - Execute a command ONLY if the user directly asks for it OR if it's essential to answer their question
-        - Do NOT execute commands speculatively or to "check" things
-        - Do NOT chain commands, only one command at a time
-        - If the user asks a question (not a command), answer without running anything
-        - NEVER execute commands without being asked
+        - Execute a command ONLY if the user explicitly asks OR it is strictly required to answer
+        - Never execute speculatively or to "check" things
+        - Never call run_command more than once per response
+        - One command at a time, no chaining (no ; && ||)
+        - If no command is needed, respond directly in FORMAT B
 
-        AVAILABLE TOOL
-        - run_command: Runs a command in the shell and returns the output.
+        TOOL
+        - run_command: runs a shell command and returns output
+        - If you call a tool, output NO text content whatsoever. ONLY the tool call
+        - Never combine a text response with a tool call in the same message
+        - Text response and tool calls are mutually exclusive
 
-        TOOL RESPONSE FORMAT
-        Responses are JSON with:
-        - guardrail (string): "" = success, "block" = invalid, "partial" = dangerous, "no-exec" = read-only
-        - success (bool): Whether command succeeded
-        - result (string): Command output
-        - error (string): Error messages
-        - new_working_directory (string or null): Updated working directory if changed, otherwise null
+        AFTER TOOL EXECUTION
+        - After receiving any tool result (success or error), do NOT call another tool
+        - Respond immediately using FORMAT A
 
-        HANDLING BLOCKED COMMANDS
-        - guardrail="block": Do NOT retry. Pass the error to the responder.
-        - guardrail="partial": Do NOT execute NOR retry. Pass to responder.
-        - guardrail="no-exec": Do NOT execute. Pass to responder.
-        """
+        BLOCKED COMMANDS
+        - If a guardrail blocks your command, do NOT retry
+        - Respond with FORMAT A: Command is what you attempted, Result is failure, Output is the guardrail error
 
-        self.responder_prompt = """
-        You are a CLI assistant that communicates results to the user.
+        RESPONSE FORMAT — use exactly one, no deviations, no extra lines
 
-        You will receive conversation history that may include tool execution results.
-
-        You MUST output EXACTLY one of the two formats below.
-        The structure and line breaks are mandatory.
-
-        ========================
-        FORMAT A (if a tool ran or was blocked)
-        ========================
-
-        <message>
+        FORMAT A — a command ran or was blocked:
+        <brief message>
         Command: <command>
         Result: <success|failure>
-        Output: <tool output>
+        Output:
 
-        Rules for FORMAT A:
-        - The response must contain exactly four lines.
-        - Line 1 is a brief friendly message to the user.
-        - Line 2 must start exactly with: Command:
-        - Line 3 must start exactly with: Result:
-        - Line 4 must start exactly with: Output:
-        - Each of the four fields must be on its own line.
-        - Do not merge multiple fields onto one line.
-        - Do not add blank lines.
-        - Do not add extra commentary before or after.
-        - Do not indent any lines.
+            <full tool output or guardrail error indented by 4 spaces>
+        Rules: exactly 6 lines, no blank lines, lines 2-4 must start exactly with Command: / Result: / Output:, line 5 is blank and line 6 is the start of the output content
 
-        ========================
-        FORMAT B (if no tool ran)
-        ========================
-
-        <message>
-
-        Rules for FORMAT B:
-        - The response must contain exactly one line.
-        - Do not add additional lines.
-        - Do not include Command:, Result:, or Output:.
-        - Keep the message brief.
-
-        Decision Rules:
-        - Use FORMAT A only if a command was executed or blocked.
-        - Use FORMAT B only if no tool was called.
-
-        If the required structure is not followed exactly, the output is invalid.
-        """
-
-    def invoke(self, user_input: str, max_iterations: int = 8):
-        state = {
-            "messages": [HumanMessage(content=user_input)],
-            "working_directory": os.getcwd()
-        }
-        config = {
-            "recursion_limit": max_iterations,
-            "configurable": {"thread_id": self.thread_id},
-            "callbacks": [self.usage_callback]
-        }
-        return self.graph.invoke(state, config)
+        FORMAT B — no command ran:
+        <brief message>
+        Rules: exactly 1 line, no Command:/Result:/Output: fields
+        """).strip()
 
     def stream(self, user_input: str, max_iterations: int = 8):
         state = {
@@ -159,13 +118,14 @@ class Agent:
                 *state["messages"]
             ]
 
+            append_llm_input("reasoning_node", messages)
             response = self.llm.llm.invoke(messages)
-            
+
             return {
-                "messages": state["messages"] + [response],
+                "messages": [response],
                 "working_directory": state["working_directory"]
             }
-
+        
         def tool_guardrail_node(state: AgentState) -> AgentState:
             last_message = state["messages"][-1]
             guardrail_errors = []
@@ -298,7 +258,7 @@ class Agent:
 
             if guardrail_errors:
                 return {
-                    "messages": state["messages"] + guardrail_errors, 
+                    "messages": guardrail_errors, 
                     "working_directory": state["working_directory"]
                 }
 
@@ -308,15 +268,21 @@ class Agent:
             last_message = state["messages"][-1]
 
             if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                return "tool"
+                return "tool_guardrail"
 
             if isinstance(last_message, ToolMessage):
-                tool_result = json.loads(last_message.content)
-                if tool_result.get("success") and tool_result.get("guardrail") == "":
-                    return "responder"
                 return "reasoning"
 
-            return "responder"
+            if isinstance(last_message, AIMessage):
+                return END
+
+            return END
+        
+        def after_guardrail(state: AgentState):
+            last_message = state["messages"][-1]
+            if isinstance(last_message, ToolMessage):
+                return "reasoning"
+            return "tool"
 
         def tool_node(state: AgentState):
             tool_results = []
@@ -330,11 +296,9 @@ class Agent:
                 tool = tools_by_name.get(tool_call["name"])
 
                 try:
+                    tool.working_directory = state.get("working_directory")
                     result = tool.invoke({
                         "command": tool_call["args"].get("command"),
-                        "shell_path": self.shell_path,
-                        "shell_flag": self.shell_flag,
-                        "working_directory": state.get("working_directory"),
                     })
 
                     response = json.loads(result.model_dump_json())
@@ -359,22 +323,8 @@ class Agent:
                     ))
 
             return {
-                "messages": state["messages"] + tool_results,
+                "messages": tool_results,
                 "working_directory": new_working_directory
-            }
-        
-        def responder_node(state: AgentState) -> AgentState:
-            messages = [
-                SystemMessage(content=self.responder_prompt + f"\nCurrent working directory: {state['working_directory']}"),
-                *state["messages"]
-            ]
-            
-            responder_llm = init_chat_model(model=os.getenv("GROQ_MODEL"), temperature=0.15)
-            response = responder_llm.invoke(messages)
-            
-            return {
-                "messages": state["messages"] + [response],
-                "working_directory": state["working_directory"]
             }
 
         graph = StateGraph(AgentState)
@@ -382,16 +332,10 @@ class Agent:
         graph.add_node("reasoning", reasoning_node)
         graph.add_node("tool_guardrail", tool_guardrail_node)
         graph.add_node("tool", tool_node)
-        graph.add_node("responder", responder_node)
 
         graph.add_edge(START, "reasoning")
-        graph.add_conditional_edges("tool_guardrail", should_continue)
+        graph.add_conditional_edges("reasoning", should_continue)
+        graph.add_conditional_edges("tool_guardrail", after_guardrail)
         graph.add_conditional_edges("tool", should_continue)
-        graph.add_conditional_edges("reasoning", should_continue, {
-            "tool": "tool_guardrail",
-            "responder": "responder",
-            END: END
-        })
-        graph.add_edge("responder", END)
 
         return graph.compile(checkpointer=self.memory)

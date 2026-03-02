@@ -1,7 +1,4 @@
-from langchain.messages import AnyMessage
-from typing_extensions import TypedDict, Annotated
-import operator
+from langgraph.graph import MessagesState
 
-class AgentState(TypedDict):
-    messages: Annotated[list[AnyMessage], operator.add]
+class AgentState(MessagesState):
     working_directory: str

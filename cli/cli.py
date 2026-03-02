@@ -9,7 +9,7 @@ from pyfiglet import Figlet
 from rich.console import Console
 from rich.panel import Panel
 from rich.live import Live
-from rich.markdown import Markdown
+from rich.text import Text
 from rich.align import Align
 
 from prompt_toolkit import PromptSession
@@ -18,7 +18,7 @@ from prompt_toolkit.formatted_text import HTML
 
 from cli.utils.lexer import RunLexer
 from cli.agent import Agent
-from cli.tools.run_command import run_command
+from cli.tools.run_command import RunCommandTool
 
 from langgraph.errors import GraphRecursionError
 from langchain_core.messages import AIMessageChunk
@@ -74,7 +74,11 @@ def main():
 
     agent = Agent(
         temperature=args.temperature,
-        tools=[run_command],
+        tools=[RunCommandTool(
+            shell_path=shell_path,
+            shell_flag=shell_flag,
+            working_directory=os.getcwd()
+        )],
         no_exec=args.no_exec,
         shell_path=shell_path,
         shell_flag=shell_flag,
@@ -156,14 +160,15 @@ def main():
                         for msg, metadata in agent.stream(user_input):
                             if (
                                 isinstance(msg, AIMessageChunk)
-                                and metadata.get("langgraph_node") == "responder"
+                                and metadata.get("langgraph_node") == "reasoning"
                                 and msg.content
+                                and not msg.tool_call_chunks
                             ):
                                 full_response += msg.content
 
                                 live.update(
                                     Panel(
-                                        Markdown(full_response),
+                                        Text(full_response),
                                         border_style="white",
                                         padding=(1, 2),
                                         expand=True,
@@ -184,7 +189,7 @@ def main():
                                 models.append(model)
 
                             usage_text = (
-                                f"{' · '.join(models)} · ↑ {total_output} ↓ {total_input} · "
+                                f"{' · '.join(models)} · ↑ {total_input} ↓ {total_output} · "
                                 f"{total_input + total_output} tok"
                             )
 
