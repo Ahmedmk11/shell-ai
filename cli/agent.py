@@ -1,12 +1,9 @@
 import os
 import json
 import platform
-
 import textwrap
-from uuid import uuid4
 
 from langchain.chat_models import init_chat_model
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, StateGraph, END
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.callbacks import UsageMetadataCallbackHandler
@@ -31,9 +28,13 @@ class LLMClient:
 class Agent:
     def __init__(self, temperature: float = 0.15, tools: list | None = None, no_exec: bool = False, shell_path: str = "", shell_flag: str = "") -> None:
         self.usage_callback = UsageMetadataCallbackHandler()
+        self.last_usage = {}
+
         self.tools = tools if tools else []
         self.no_exec = no_exec
 
+        self.history = []
+        
         if not shell_path:
             if platform.system() == "Windows":
                 shell_path = "C:\\Windows\\System32\\cmd.exe"
@@ -48,21 +49,27 @@ class Agent:
         self.shell_path = shell_path
         self.shell_flag = shell_flag
 
-        self.thread_id = str(uuid4())
-        self.memory = MemorySaver()
-
         self.llm = LLMClient(temperature, self.tools)
+
         self.graph = self._build_graph()
+        self.curr_working_directory = os.getcwd()
 
-        self.system_prompt = textwrap.dedent(f"""You are a CLI agent. You reason, execute shell commands when needed, and respond to the user.
+        self.base_environment_prompt = textwrap.dedent(f"""
+        Extra context:
+                                                                                      
+        Current Shell: {self.shell_path} 
+        Current Shell's Execution Flag: {self.shell_flag}
+        """).strip()
 
-        ENVIRONMENT
-        Shell: {shell_path} (flag: {shell_flag})
-        Only use syntax compatible with {shell_path}.
+        self.system_prompt = textwrap.dedent(f"""
+        You are a CLI agent. You reason, execute shell commands when needed, and respond to the user.
 
+        You will find shell environment details at the end of the prompt.
+                                             
         REASONING RULES
         - Execute a command ONLY if the user explicitly asks OR it is strictly required to answer
         - Never execute speculatively or to "check" things
+        - If the user asked for an exact command but it looks potentially malformed, respond with a clarification question instead of executing directly. (e.g. "User: please run cd ,," -> "Agent: The command you provided looks like it has a typo. Did you mean 'cd ..' to go up one directory?")
         - Never call run_command more than once per response
         - One command at a time, no chaining (no ; && ||)
         - If no command is needed, respond directly in FORMAT B
@@ -72,6 +79,7 @@ class Agent:
         - If you call a tool, output NO text content whatsoever. ONLY the tool call
         - Never combine a text response with a tool call in the same message
         - Text response and tool calls are mutually exclusive
+        - Only use syntax compatible with the specified shell
 
         AFTER TOOL EXECUTION
         - After receiving any tool result (success or error), do NOT call another tool
@@ -89,7 +97,7 @@ class Agent:
         Result: <success|failure>
         Output:
 
-            <full tool output or guardrail error indented by 4 spaces>
+            <full output of the executed tool from ToolResult.result or ToolResult.error indented by 4 spaces>
         Rules: exactly 6 lines, no blank lines, lines 2-4 must start exactly with Command: / Result: / Output:, line 5 is blank and line 6 is the start of the output content
 
         FORMAT B — no command ran:
@@ -98,32 +106,49 @@ class Agent:
         """).strip()
 
     def stream(self, user_input: str, max_iterations: int = 8):
+        self.history.append(HumanMessage(content=user_input))
+
         state = {
-            "messages": [HumanMessage(content=user_input)],
-            "working_directory": os.getcwd()
+            "messages": self.history,
         }
         config = {
             "recursion_limit": max_iterations,
-            "configurable": {"thread_id": self.thread_id},
             "callbacks": [self.usage_callback]
         }
         
+        final_state = None
+
         for msg, metadata in self.graph.stream(state, config, stream_mode="messages"):
             yield msg, metadata
+            final_state = metadata.get("state") if metadata else None
+
+        if final_state and "messages" in final_state:
+            self.history = final_state["messages"]
+
+    def build_dynamic_prompt(self):
+        return (
+            f"{self.base_environment_prompt}\n"
+            f"Current working directory: {self.curr_working_directory}"
+        )
 
     def _build_graph(self):
+
+        # @traceable("reasoning_node")
         def reasoning_node(state: AgentState) -> AgentState:
+            dynamic_prompt = self.build_dynamic_prompt()
             messages = [
-                SystemMessage(content=self.system_prompt + f"\nCurrent working directory: {state['working_directory']}"),
-                *state["messages"]
+                SystemMessage(content=self.system_prompt), # static instructions
+                *state["messages"],
+                HumanMessage(content=dynamic_prompt), # dynamic environment details
             ]
 
             append_llm_input("reasoning_node", messages)
             response = self.llm.llm.invoke(messages)
 
+            self.last_usage = getattr(response, "response_metadata", {}).get("usage", {})
+
             return {
                 "messages": [response],
-                "working_directory": state["working_directory"]
             }
         
         def tool_guardrail_node(state: AgentState) -> AgentState:
@@ -259,7 +284,6 @@ class Agent:
             if guardrail_errors:
                 return {
                     "messages": guardrail_errors, 
-                    "working_directory": state["working_directory"]
                 }
 
             return state
@@ -286,7 +310,6 @@ class Agent:
 
         def tool_node(state: AgentState):
             tool_results = []
-            new_working_directory = state.get("working_directory")
 
             last_message = state["messages"][-1]
 
@@ -296,7 +319,7 @@ class Agent:
                 tool = tools_by_name.get(tool_call["name"])
 
                 try:
-                    tool.working_directory = state.get("working_directory")
+                    tool.working_directory = self.curr_working_directory
                     result = tool.invoke({
                         "command": tool_call["args"].get("command"),
                     })
@@ -304,7 +327,7 @@ class Agent:
                     response = json.loads(result.model_dump_json())
 
                     if response.get("new_working_directory"):
-                        new_working_directory = response["new_working_directory"]
+                        self.curr_working_directory = response["new_working_directory"]
 
                     tool_results.append(ToolMessage(
                         content=result.model_dump_json(),
@@ -324,7 +347,6 @@ class Agent:
 
             return {
                 "messages": tool_results,
-                "working_directory": new_working_directory
             }
 
         graph = StateGraph(AgentState)
@@ -338,4 +360,4 @@ class Agent:
         graph.add_conditional_edges("tool_guardrail", after_guardrail)
         graph.add_conditional_edges("tool", should_continue)
 
-        return graph.compile(checkpointer=self.memory)
+        return graph.compile()

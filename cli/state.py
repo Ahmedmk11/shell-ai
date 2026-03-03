@@ -1,4 +1,5 @@
-from langgraph.graph import MessagesState
+from typing import Annotated, TypedDict
+from langgraph.graph.message import add_messages
 
-class AgentState(MessagesState):
-    working_directory: str
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages]

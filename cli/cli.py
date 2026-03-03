@@ -84,6 +84,9 @@ def main():
         shell_flag=shell_flag,
     )
 
+    prev_prompt_tokens = 0
+    prev_completion_tokens = 0
+
     print_header()
 
     session = PromptSession(lexer=RunLexer())
@@ -188,15 +191,21 @@ def main():
                                 total_output += usage.get("output_tokens", 0)
                                 models.append(model)
 
+                            delta_input = total_input - prev_prompt_tokens
+                            delta_output = total_output - prev_completion_tokens
+
+                            prev_prompt_tokens = total_input
+                            prev_completion_tokens = total_output
+
                             usage_text = (
-                                f"{' · '.join(models)} · ↑ {total_input} ↓ {total_output} · "
-                                f"{total_input + total_output} tok"
+                                f"{' · '.join(models)} · ↑ {delta_input} ↓ {delta_output} · "
+                                f"{delta_input + delta_output} tok"
                             )
 
                             console.print(
                                 Align.right(f"[dim]{usage_text}[/dim]")
                             )
-
+                            
                 except GraphRecursionError:
                     print("Error: The agent got stuck in a loop and was stopped.")
                 except Exception as e:
