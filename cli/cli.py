@@ -167,6 +167,9 @@ def main():
                 try:
                     console = Console()
 
+                    full_response = ""
+                    current_step = None
+
                     with Live(console=console, refresh_per_second=15) as live:
                         for msg, metadata in agent.stream(user_input):
                             if (
@@ -175,6 +178,12 @@ def main():
                                 and msg.content
                                 and not msg.tool_call_chunks
                             ):
+                                step = metadata.get("langgraph_step")
+                                if step != current_step:
+                                    current_step = step
+                                    if full_response:
+                                        full_response += "\n\n"
+
                                 content = msg.content
                                 if isinstance(content, list):
                                     for block in content:
@@ -183,16 +192,7 @@ def main():
                                 else:
                                     full_response += content
 
-                                live.update(
-                                    Panel(
-                                        Markdown(full_response),
-                                        border_style="white",
-                                        padding=(1, 2),
-                                        expand=True,
-                                        title="Agent",
-                                        title_align="left"
-                                    )
-                                )
+                                live.update(Panel(Markdown(full_response), border_style="white", padding=(1, 2), expand=True, title="Agent", title_align="left"))
 
                     if not args.no_usage:
                         if agent.usage_callback.usage_metadata:
@@ -221,7 +221,7 @@ def main():
                             )
                             
                 except GraphRecursionError:
-                    print("Error: The agent got stuck in a loop and was stopped.")
+                    print("Error: The agent ran out of steps before finishing. Try a simpler request.")
                 except Exception as e:
                     print(f"Error: {e}")
 
