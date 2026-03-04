@@ -36,7 +36,11 @@ class RunCommandTool(BaseTool):
                 target = tokens[1] if len(tokens) > 1 else str(Path.home())
 
                 try:
-                    new_path = (Path(self.working_directory) / target).expanduser().resolve()
+                    if Path(target).is_absolute():
+                        new_path = Path(target).expanduser().resolve()
+                    else:
+                        new_path = (Path(self.working_directory) / target).expanduser().resolve()
+
                     if not new_path.exists() or not new_path.is_dir():
                         return ToolResult(
                             guardrail="",
@@ -46,11 +50,10 @@ class RunCommandTool(BaseTool):
                             new_working_directory=None
                         )
                     else:
-                        os.chdir(new_path)
                         return ToolResult(
                             guardrail="",
                             success=True,
-                            result=f"Successfully changed directory to {new_path}",
+                            result="",
                             error="",
                             new_working_directory=str(new_path)
                         )

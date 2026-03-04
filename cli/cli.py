@@ -9,8 +9,8 @@ from pyfiglet import Figlet
 from rich.console import Console
 from rich.panel import Panel
 from rich.live import Live
-from rich.text import Text
 from rich.align import Align
+from rich.markdown import Markdown
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style
@@ -51,7 +51,7 @@ def authenticate_github():
 def main():
     parser = argparse.ArgumentParser(prog="shellai")
 
-    parser.add_argument("--temperature", type=float, default=0.15, help="Temperature for the model")
+    parser.add_argument("--temperature", type=float, default=0, help="Temperature for the model")
     parser.add_argument("--no-exec", action="store_true", help="Flag to disable execution")
     parser.add_argument("--no-path", action="store_true", help="Flag to hide file paths in CLI")
     parser.add_argument("--no-usage", action="store_true", help="Flag to disable usage tracking")
@@ -97,7 +97,7 @@ def main():
 
     while True:
         try:
-            cwd = Path.cwd()
+            cwd = Path(agent.curr_working_directory)
             displayed_path = cwd.as_posix() if not args.no_path else cwd.as_posix().split("/")[-1]
 
             user_input = session.prompt(
@@ -132,17 +132,25 @@ def main():
                         target = parts[1] if len(parts) > 1 else str(Path.home())
 
                         try:
-                            new_path = Path(target).expanduser().resolve()
+                            if Path(target).is_absolute():
+                                new_path = Path(target).expanduser().resolve()
+                            else:
+                                new_path = (Path(agent.curr_working_directory) / target).expanduser().resolve()
+
                             if not new_path.exists() or not new_path.is_dir():
                                 print("Directory does not exist.")
                             else:
-                                os.chdir(new_path)
+                                agent.curr_working_directory = str(new_path)
+
                         except Exception as e:
                             print(f"Invalid path: {e}")
 
                         continue
-
-                    process = subprocess.run([shell_path, shell_flag, cmd])
+                    
+                    process = subprocess.run(
+                        [shell_path, shell_flag, cmd],
+                        cwd=agent.curr_working_directory
+                    )
                     continue
                 except KeyboardInterrupt:
                     process.terminate()
@@ -167,11 +175,17 @@ def main():
                                 and msg.content
                                 and not msg.tool_call_chunks
                             ):
-                                full_response += msg.content
+                                content = msg.content
+                                if isinstance(content, list):
+                                    for block in content:
+                                        if isinstance(block, dict) and block.get("type") == "text":
+                                            full_response += block.get("text", "")
+                                else:
+                                    full_response += content
 
                                 live.update(
                                     Panel(
-                                        Text(full_response),
+                                        Markdown(full_response),
                                         border_style="white",
                                         padding=(1, 2),
                                         expand=True,

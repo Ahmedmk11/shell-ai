@@ -7,28 +7,31 @@ from langchain.chat_models import init_chat_model
 from langgraph.graph import START, StateGraph, END
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.callbacks import UsageMetadataCallbackHandler
+from langgraph.checkpoint.memory import MemorySaver
 
 from cli.state import AgentState
 from cli.utils.debug_logger import append_llm_input
 from cli.utils.tool_result import ToolResult
 
 def get_env_model():
-    model = os.getenv("GROQ_MODEL")
+    model = os.getenv("ANTHROPIC_MODEL")
     if not model:
         raise ValueError("Model is not set")
     return model
 
 class LLMClient:
-    def __init__(self, temperature: float = 0.15, tools: list | None = None) -> None:
+    def __init__(self, temperature: float = 0, tools: list | None = None) -> None:
         self.llm = init_chat_model(
             model=get_env_model(),
             temperature=temperature,
+            model_kwargs={
+                "cache_control": {"type": "ephemeral"}
+            },
         ).bind_tools(tools if tools else [])
 
 class Agent:
-    def __init__(self, temperature: float = 0.15, tools: list | None = None, no_exec: bool = False, shell_path: str = "", shell_flag: str = "") -> None:
+    def __init__(self, temperature: float = 0, tools: list | None = None, no_exec: bool = False, shell_path: str = "", shell_flag: str = "") -> None:
         self.usage_callback = UsageMetadataCallbackHandler()
-        self.last_usage = {}
 
         self.tools = tools if tools else []
         self.no_exec = no_exec
@@ -51,79 +54,52 @@ class Agent:
 
         self.llm = LLMClient(temperature, self.tools)
 
+        self.checkpointer = MemorySaver()
         self.graph = self._build_graph()
         self.curr_working_directory = os.getcwd()
 
         self.base_environment_prompt = textwrap.dedent(f"""
-        Extra context:
+        Environment Details:
                                                                                       
         Current Shell: {self.shell_path} 
         Current Shell's Execution Flag: {self.shell_flag}
         """).strip()
 
-        self.system_prompt = textwrap.dedent(f"""
-        You are a CLI agent. You reason, execute shell commands when needed, and respond to the user.
+        self.system_prompt = textwrap.dedent("""
+        You are a CLI agent.
 
-        You will find shell environment details at the end of the prompt.
+        Your role is to decide whether to execute a single shell command or respond directly.
+        You are very concise.
+        Assume directory change commands (e.g. cd) changes the directory of the shell session if they succeed.
                                              
-        REASONING RULES
-        - Execute a command ONLY if the user explicitly asks OR it is strictly required to answer
-        - Never execute speculatively or to "check" things
-        - If the user asked for an exact command but it looks potentially malformed, respond with a clarification question instead of executing directly. (e.g. "User: please run cd ,," -> "Agent: The command you provided looks like it has a typo. Did you mean 'cd ..' to go up one directory?")
-        - Never call run_command more than once per response
-        - One command at a time, no chaining (no ; && ||)
-        - If no command is needed, respond directly in FORMAT B
+        RULES
 
-        TOOL
-        - run_command: runs a shell command and returns output
-        - If you call a tool, output NO text content whatsoever. ONLY the tool call
-        - Never combine a text response with a tool call in the same message
-        - Text response and tool calls are mutually exclusive
-        - Only use syntax compatible with the specified shell
-
-        AFTER TOOL EXECUTION
-        - After receiving any tool result (success or error), do NOT call another tool
-        - Respond immediately using FORMAT A
-
-        BLOCKED COMMANDS
-        - If a guardrail blocks your command, do NOT retry
-        - Respond with FORMAT A: Command is what you attempted, Result is failure, Output is the guardrail error
-
-        RESPONSE FORMAT — use exactly one, no deviations, no extra lines
-
-        FORMAT A — a command ran or was blocked:
-        <brief message>
-        Command: <command>
-        Result: <success|failure>
-        Output:
-
-            <full output of the executed tool from ToolResult.result or ToolResult.error indented by 4 spaces>
-        Rules: exactly 6 lines, no blank lines, lines 2-4 must start exactly with Command: / Result: / Output:, line 5 is blank and line 6 is the start of the output content
-
-        FORMAT B — no command ran:
-        <brief message>
-        Rules: exactly 1 line, no Command:/Result:/Output: fields
+        • Only act on the current user message.
+        • Execute a command only if the user explicitly asks for it or it is strictly required to answer.
+        • Never execute speculatively.
+        • Never retry a command under any circumstance even if it fails, gets blocked or any other reason.
+        • If a command fails or is blocked, you must respond and stop.
+        • Never chain commands.
+        • Use good markdown formatting when responding, especially for code and command outputs.
+        • Be consistent with your markdown formatting. Use the same format for the same type of content every time.
         """).strip()
 
     def stream(self, user_input: str, max_iterations: int = 8):
         self.history.append(HumanMessage(content=user_input))
 
-        state = {
-            "messages": self.history,
-        }
+        state = {"messages": self.history}
         config = {
             "recursion_limit": max_iterations,
-            "callbacks": [self.usage_callback]
+            "callbacks": [self.usage_callback],
+            "configurable": {"thread_id": "main"}
         }
-        
-        final_state = None
 
         for msg, metadata in self.graph.stream(state, config, stream_mode="messages"):
             yield msg, metadata
-            final_state = metadata.get("state") if metadata else None
 
-        if final_state and "messages" in final_state:
-            self.history = final_state["messages"]
+        final_state = self.graph.get_state(config)
+        new_messages = final_state.values["messages"][len(self.history):]
+        self.history.extend(new_messages)
 
     def build_dynamic_prompt(self):
         return (
@@ -132,20 +108,17 @@ class Agent:
         )
 
     def _build_graph(self):
-
-        # @traceable("reasoning_node")
         def reasoning_node(state: AgentState) -> AgentState:
             dynamic_prompt = self.build_dynamic_prompt()
+            
             messages = [
-                SystemMessage(content=self.system_prompt), # static instructions
+                SystemMessage(content=self.system_prompt),
+                SystemMessage(content=dynamic_prompt),
                 *state["messages"],
-                HumanMessage(content=dynamic_prompt), # dynamic environment details
             ]
 
             append_llm_input("reasoning_node", messages)
             response = self.llm.llm.invoke(messages)
-
-            self.last_usage = getattr(response, "response_metadata", {}).get("usage", {})
 
             return {
                 "messages": [response],
@@ -252,6 +225,36 @@ class Agent:
                         ))
                         continue
 
+                    # # block double run_command calls
+                    # messages = state["messages"]
+                    # last_human_idx = max(
+                    #     (i for i, m in enumerate(messages) if isinstance(m, HumanMessage)),
+                    #     default=0
+                    # )
+
+                    # current_turn = messages[last_human_idx + 1:]                    
+                    # already_ran_command = any(
+                    #     isinstance(m, AIMessage)
+                    #     and hasattr(m, "tool_calls")
+                    #     and any(tc["name"] == "run_command" for tc in m.tool_calls)
+                    #     for m in current_turn
+                    # )
+
+                    # if already_ran_command:
+                    #     guardrail_errors.append(
+                    #         ToolMessage(
+                    #             content=ToolResult(
+                    #                 guardrail="block",
+                    #                 success=False,
+                    #                 result="",
+                    #                 error="(Guardrail) run_command already called once this turn. Only one command allowed per user message.",
+                    #                 new_working_directory=None
+                    #             ).model_dump_json(),
+                    #             tool_call_id=tool_call["id"]
+                    #         )
+                    #     )
+                    #     continue
+                    
                     # does the command contain chained operators?
                     if any(op in command for op in [";", "&&", "||"]):
                         guardrail_errors.append(ToolMessage(
@@ -360,4 +363,4 @@ class Agent:
         graph.add_conditional_edges("tool_guardrail", after_guardrail)
         graph.add_conditional_edges("tool", should_continue)
 
-        return graph.compile()
+        return graph.compile(checkpointer=self.checkpointer)

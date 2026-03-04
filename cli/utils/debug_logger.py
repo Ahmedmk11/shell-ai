@@ -17,6 +17,21 @@ def append_llm_input(appender_name: str, messages: list[BaseMessage]) -> None:
 
         for msg in messages:
             f.write(f"\n[{msg.__class__.__name__}]\n")
-            f.write(msg.content.strip() + "\n")
+            content = msg.content
+
+            if isinstance(content, str):
+                text = content.strip()
+
+            elif isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                text = "".join(text_parts).strip()
+
+            else:
+                text = str(content).strip()
+
+            f.write(text + "\n")
 
         f.write("\n")
