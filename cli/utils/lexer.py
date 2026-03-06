@@ -11,7 +11,7 @@ class RunLexer(Lexer):
             if lower == "run":
                 return [("class:command", line)]
 
-            if lower == "exit":
+            if lower == "exit" or lower == "clear":
                 return [("class:command", line)]
             
             if lower.startswith("run "):

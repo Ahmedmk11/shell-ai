@@ -37,8 +37,6 @@ class Agent:
         self.mcp_tools = mcp_tools if mcp_tools else []
         self.tools = [*self.local_tools, *self.mcp_tools]
 
-        print(f"Initialized Agent with tools: {[tool.name for tool in self.tools]}")
-
         self.no_exec = no_exec
 
         self.history = []
@@ -83,18 +81,18 @@ class Agent:
         • Only act on the current user message.
         • Execute a command only if the user explicitly asks for it or it is strictly required to answer.
         • Never execute speculatively.
+        • When a tool response contains information needed for a subsequent tool call (e.g. owner, sha, branch), always extract and use it directly without asking the user.
         • Always include the exact command you executed or failed to execute in your response, separate from the output. (e.g. Command: git add .)      
         • If you execute a command, you must include the output of the command, even if it's an error in your response as a clearly formatted code block.
         • Never retry a command under any circumstance even if it fails, gets blocked or any other reason.
         • If a command fails or is blocked, you must respond and stop.
-        • Never chain commands.
         • Use good markdown formatting when responding, especially for code and command outputs.
         • Be consistent with your markdown formatting. Use the same format for the same type of content every time.
         • Never make up command outputs. If you don't know the output, respond with "Unknown output".
         • The user can execute commands manually themselves by typing run <command>. Bypassing you entirely.
         """).strip()
 
-    async def stream(self, user_input: str, max_iterations: int = 16):
+    async def stream(self, user_input: str, max_iterations: int = 32):
         if len(user_input) > 1000:
             raise ValueError("Input is too long. Please limit your input to 1000 characters.")
 
@@ -253,8 +251,8 @@ class Agent:
                         continue
 
                     # is it a destructive command?
-                    command = tool_call["args"].get("command", "").lower()
-                    command_parts = command.lower().split()
+                    command = tool_call["args"].get("command", "")
+                    command_parts = command.split()
                     if any(word in command_parts for word in destructive_words):
                         guardrail_errors.append(ToolMessage(
                             content=ToolResult(

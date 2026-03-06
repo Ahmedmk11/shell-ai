@@ -7,6 +7,18 @@ An AI-powered CLI agent that lives in your terminal. Ask it questions or have it
 
 ---
 
+## Table of Contents
+
+- [Screenshots](#screenshots)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Options](#options)
+- [Example](#example)
+
+---
+
 ## Screenshots
 
 ### Agent Capabilities Overview
