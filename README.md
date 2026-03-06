@@ -9,6 +9,22 @@ An AI-powered CLI agent that lives in your terminal. Ask it questions or have it
 
 ## Screenshots
 
+### Agent Capabilities Overview
+
+![Startup](https://github.com/user-attachments/assets/0b2ebbf4-5a0e-4fc9-9d13-b9177dc0055c)
+
+### Automatic Git Commit and Push
+
+![Commands](https://github.com/user-attachments/assets/3e70c07a-3267-4e7f-868a-a65a079dcdef)
+
+### File System Commands & Safety Guardrails
+
+![PR](https://github.com/user-attachments/assets/65899ea8-287c-4c82-a474-5826244cb175)
+
+### MCP tool calls: PR Request & Issue Creation
+
+![Issue](https://github.com/user-attachments/assets/27be0354-48db-4836-bc95-d2b414e034dc)
+
 ---
 
 ## Prerequisites
