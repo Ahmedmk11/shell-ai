@@ -49,8 +49,18 @@ An AI-powered CLI agent that lives in your terminal. Ask it questions or have it
 ## Installation
 
 ```bash
+# macOS / Linux
 git clone https://github.com/Ahmedmk11/shell-ai.git
 cd shell-ai
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+# Windows (PowerShell)
+git clone https://github.com/Ahmedmk11/shell-ai.git
+cd shell-ai
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -e .
 ```
 
