@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.scripts]
-shellai = "cli.cli:main"
+shellai = "cli.cli:run"
 
 [tool.uv]
 package = true

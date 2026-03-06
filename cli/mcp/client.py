@@ -1,12 +1,14 @@
+import sys
+
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 async def instantiate_client():
     client = MultiServerMCPClient(
         {
-            "math": {
+            "github": {
                 "transport": "stdio",
-                "command": "sys.executable",
-                "args": ["cli/mcp/servers/github/server.py"]
+                "command": sys.executable,
+                "args": ["cli/mcp/servers/github_server.py"]
             },
         }
     )

@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 from pathlib import Path
 import shellingham
 import subprocess
@@ -16,9 +17,11 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
 
+from cli.mcp.client import instantiate_client
 from cli.utils.lexer import RunLexer
 from cli.agent import Agent
 from cli.tools.run_command import RunCommandTool
+from cli.utils.pat_utils import save_github_token
 
 from langgraph.errors import GraphRecursionError
 from langchain_core.messages import AIMessageChunk
@@ -41,23 +44,18 @@ def print_header():
     ascii_title = f.renderText('ShellAI').rstrip()
     console.print(Panel(f"[#2563EB]{ascii_title}", border_style="#1D4ED8"))
 
-    console.print("\nType [bold #2563EB]'exit'[/] to quit")
-    console.print("[dim]AI prompt by default · Use [bold #2563EB]run[/] <cmd> for shell execution[/]\n")
+    console.print("\nType [bold #2563EB]'exit'[/] to quit.")
+    console.print("[dim]AI prompt by default · Use [bold #2563EB]run[/] <cmd> for shell execution.[/]")
+    console.print("[dim]Authenticate GitHub with [bold #2563EB]gh auth[/].")
+    console.print("[dim]Use [bold #2563EB]clear[/] to clear the terminal.[/]\n")
 
-def authenticate_github():
-    # Placeholder for GitHub authentication logic
-    pass
-
-def main():
+async def main():
     parser = argparse.ArgumentParser(prog="shellai")
 
     parser.add_argument("--temperature", type=float, default=0, help="Temperature for the model")
     parser.add_argument("--no-exec", action="store_true", help="Flag to disable execution")
     parser.add_argument("--no-path", action="store_true", help="Flag to hide file paths in CLI")
     parser.add_argument("--no-usage", action="store_true", help="Flag to disable usage tracking")
-
-    parser.add_argument("--github", action="store_false", help="Flag to enable GitHub authentication")
-    parser.add_argument("--repo", type=str, default=".", help="Repository to use")
 
     args = parser.parse_args()
 
@@ -72,6 +70,8 @@ def main():
     else:
         shell_flag = "-c"
 
+    client, mcp_tools = await instantiate_client()
+
     agent = Agent(
         temperature=args.temperature,
         tools=[RunCommandTool(
@@ -82,6 +82,7 @@ def main():
         no_exec=args.no_exec,
         shell_path=shell_path,
         shell_flag=shell_flag,
+        mcp_tools=mcp_tools,
     )
 
     prev_prompt_tokens = 0
@@ -100,7 +101,7 @@ def main():
             cwd = Path(agent.curr_working_directory)
             displayed_path = cwd.as_posix() if not args.no_path else cwd.as_posix().split("/")[-1]
 
-            user_input = session.prompt(
+            user_input = await session.prompt_async(
                 HTML(f"<prompt>(ShellAI)</prompt> {shell_name} {displayed_path}> "),
                 style=style
             )
@@ -113,6 +114,12 @@ def main():
                 continue
             elif user_input.lower() == "clear":
                 print_header()
+            elif user_input.lower().split()[0] == "gh" and user_input.lower().split()[1] == "auth":
+                try:
+                    token = await PromptSession().prompt_async("Enter GitHub PAT: ", is_password=True)
+                    save_github_token(token)
+                except Exception as e:
+                    print(f"GitHub authentication failed: {e}")
             elif user_input.lower().split()[0] == "run":
                 if not shell_path:
                     print("Could not detect shell.")
@@ -171,7 +178,7 @@ def main():
                     current_step = None
 
                     with Live(console=console, refresh_per_second=15) as live:
-                        for msg, metadata in agent.stream(user_input):
+                        async for msg, metadata in agent.stream(user_input):
                             if (
                                 isinstance(msg, AIMessageChunk)
                                 and metadata.get("langgraph_node") == "reasoning"
@@ -231,5 +238,8 @@ def main():
             print("Exiting ShellAI. Goodbye!")
             break
 
+def run():
+    asyncio.run(main())
+
 if __name__ == "__main__":
-    main()
+    run()

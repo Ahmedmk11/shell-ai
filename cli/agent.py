@@ -30,10 +30,15 @@ class LLMClient:
         ).bind_tools(tools if tools else [])
 
 class Agent:
-    def __init__(self, temperature: float = 0, tools: list | None = None, no_exec: bool = False, shell_path: str = "", shell_flag: str = "") -> None:
+    def __init__(self, temperature: float = 0, tools: list | None = None, no_exec: bool = False, shell_path: str = "", shell_flag: str = "",  mcp_tools: list | None = None) -> None:
         self.usage_callback = UsageMetadataCallbackHandler()
 
-        self.tools = tools if tools else []
+        self.local_tools = tools if tools else []
+        self.mcp_tools = mcp_tools if mcp_tools else []
+        self.tools = [*self.local_tools, *self.mcp_tools]
+
+        print(f"Initialized Agent with tools: {[tool.name for tool in self.tools]}")
+
         self.no_exec = no_exec
 
         self.history = []
@@ -89,7 +94,7 @@ class Agent:
         • The user can execute commands manually themselves by typing run <command>. Bypassing you entirely.
         """).strip()
 
-    def stream(self, user_input: str, max_iterations: int = 16):
+    async def stream(self, user_input: str, max_iterations: int = 16):
         if len(user_input) > 1000:
             raise ValueError("Input is too long. Please limit your input to 1000 characters.")
 
@@ -102,10 +107,10 @@ class Agent:
             "configurable": {"thread_id": "main"}
         }
 
-        for msg, metadata in self.graph.stream(state, config, stream_mode="messages"):
+        async for msg, metadata in self.graph.astream(state, config, stream_mode="messages"):
             yield msg, metadata
 
-        final_state = self.graph.get_state(config)
+        final_state = await self.graph.aget_state(config)
         new_messages = final_state.values["messages"][len(self.history):]
         self.history.extend(new_messages)
 
@@ -290,31 +295,33 @@ class Agent:
                 return "reasoning"
             return "tool"
 
-        def tool_node(state: AgentState):
+        async def tool_node(state: AgentState):
             tool_results = []
-
             last_message = state["messages"][-1]
-
             tools_by_name = {tool.name: tool for tool in self.tools}
 
             for tool_call in last_message.tool_calls:
                 tool = tools_by_name.get(tool_call["name"])
 
                 try:
-                    tool.working_directory = self.curr_working_directory
-                    result = tool.invoke({
-                        "command": tool_call["args"].get("command"),
-                    })
+                    if tool_call["name"] == "run_command":
+                        tool.working_directory = self.curr_working_directory
+                        result = tool.invoke({"command": tool_call["args"].get("command")})
 
-                    response = json.loads(result.model_dump_json())
+                        response = json.loads(result.model_dump_json())
+                        if response.get("new_working_directory"):
+                            self.curr_working_directory = response["new_working_directory"]
 
-                    if response.get("new_working_directory"):
-                        self.curr_working_directory = response["new_working_directory"]
-
-                    tool_results.append(ToolMessage(
-                        content=result.model_dump_json(),
-                        tool_call_id=tool_call["id"]
-                    ))
+                        tool_results.append(ToolMessage(
+                            content=result.model_dump_json(),
+                            tool_call_id=tool_call["id"]
+                        ))
+                    elif tool_call["name"] in {t.name for t in self.mcp_tools}:
+                        result = await tool.ainvoke(tool_call["args"])
+                        tool_results.append(ToolMessage(
+                            content=json.dumps(result),
+                            tool_call_id=tool_call["id"]
+                        ))
                 except Exception as e:
                     tool_results.append(ToolMessage(
                         content=ToolResult(

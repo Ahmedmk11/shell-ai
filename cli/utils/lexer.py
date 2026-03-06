@@ -19,6 +19,9 @@ class RunLexer(Lexer):
                     ("class:command", line[:3]),
                     ("", line[3:])
                 ]
+            
+            if lower == "gh auth" or lower == "gh":
+                return [("class:command", line)]
 
             return [("", line)]
 
